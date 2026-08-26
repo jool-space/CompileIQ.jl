@@ -1,0 +1,3 @@
+[deps]
+CompileIQ = "4b2b6ecf-6568-42de-a118-30d12bf9bad6"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
