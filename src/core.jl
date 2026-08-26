@@ -115,13 +115,16 @@ function install_core!(; force::Bool=false)
         mkpath(dest)
         # A wheel is a zip. Extract only the platform directory and the license.
         run(pipeline(`$(p7zip_jll.p7zip()) x $wheel -o$dest -y -bso0 -bsp0
-                      $(_wheel_platform_dir(arch)) compileiq-$(CORE_VERSION).dist-info/licenses`))
+                      $(_wheel_platform_dir(arch)) compileiq/core/executable/core-manifest.json
+                      compileiq-$(CORE_VERSION).dist-info/licenses`))
     end
     for exe in ("_core", "core")
         chmod(joinpath(dir, "bin", exe), 0o755)
     end
     license = joinpath(dest, "compileiq-$(CORE_VERSION).dist-info", "licenses", "LICENSE")
     isfile(license) && cp(license, joinpath(dir, "LICENSE"); force=true)
+    manifest = joinpath(dest, "compileiq", "core", "executable", "core-manifest.json")
+    isfile(manifest) && cp(manifest, joinpath(dir, "core-manifest.json"); force=true)
     isfile(joinpath(dir, "bin", "_core")) || error("wheel extraction did not produce $(joinpath(dir, "bin", "_core"))")
     return dir
 end

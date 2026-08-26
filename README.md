@@ -28,17 +28,22 @@ result = search(PtxasSearchSpace("13.3"); generations=10, pool_size=16) do acf
         rethrow()
     end
     # load `cubin` with CUDA.jl's CuModule, check the output, time it …
-    spill_bytes(log)                             # …or use a compile-only proxy
+    CompileIQ.spill_bytes(log)                   # …or use a compile-only proxy
 end
 
 write("best.acf", best(result).params)
 ```
 
 Objectives receive an `ACF` for compiler search spaces, a nested
-`Dict{String,Any}` for a user-defined `ParamSpace` (co-tuning tile sizes and
-the like), or a `Vector` of those for a mixed space `[space1, space2]`. Return
-a `Real` (a tuple for multi-objective search) or `missing` for an invalid
-candidate.
+`Dict{String,Any}` for a user-defined `CompileIQ.ParamSpace` (co-tuning tile
+sizes and the like), or a `Vector` of those for a mixed space
+`[space1, space2]`. Return a `Real` (a tuple for multi-objective search) or
+`missing` for an invalid candidate.
+
+Only the session-level names are exported (`search`, `best`, `ACF`,
+`PtxasSearchSpace`, `ptxas`, `PtxasError`); the rest of the API is `public`
+and used qualified. `CompileIQ.functional()` tells you whether a search can
+run here and `CompileIQ.versioninfo()` what it would run with.
 
 ## Booster packs
 
@@ -46,7 +51,7 @@ A booster pack is NVIDIA's distribution format for curated ACFs: a zip of
 `.acf` files plus `booster-pack-manifest.json`. Both directions are supported:
 
 ```julia
-pack = booster_pack("debug"; tag="booster-packs-2026.05.27")   # NVIDIA's, CUDA 13.3 builds
+pack = CompileIQ.booster_pack("debug"; tag="booster-packs-2026.05.27")   # NVIDIA's, CUDA 13.3 builds
 ptxas(ptx; arch="sm_89", acf=pack["ptxas_opt0"])                # canary: should be slower than no ACF
 ```
 

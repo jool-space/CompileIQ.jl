@@ -1,6 +1,10 @@
 using CompileIQ
+using CompileIQ: sample, SearchConfig, SearchResult, Candidate, NvccSearchSpace, SearchSpaceFile,
+                 ParamSpace, Range, Choice, Literal, spill_bytes,
+                 BoosterPack, write_booster_pack, read_booster_pack, booster_pack
 using Test
 using JSON
+using CUDACore
 using Base64: base64encode
 
 const FAKECORE = joinpath(@__DIR__, "fakecore.jl")
@@ -17,6 +21,37 @@ function with_fakecore(f)
 end
 
 @testset "CompileIQ.jl" begin
+    @testset "API surface" begin
+        exported = Set(filter(n -> Base.isexported(CompileIQ, n), names(CompileIQ)))   # names() also lists public ones
+        @test exported == Set([:CompileIQ, :search, :best, :ACF, :PtxasSearchSpace, :ptxas, :PtxasError])
+        for name in (:functional, :versioninfo, :sample, :SearchConfig, :ParamSpace, :Range, :Choice, :Literal,
+                     :NvccSearchSpace, :SearchSpaceFile, :spill_bytes, :ptxas_version, :booster_pack,
+                     :write_booster_pack, :read_booster_pack, :install_core!, :core_available)
+            @test Base.ispublic(CompileIQ, name) && !Base.isexported(CompileIQ, name)
+        end
+    end
+
+    @testset "diagnostics" begin
+        @test CompileIQ.functional() isa Bool
+        withenv("COMPILEIQ_CORE" => "/nonexistent") do
+            @test !CompileIQ.functional()
+            @test_logs (:warn, r"core lookup failed") CompileIQ.functional(true)
+        end
+        mktempdir() do dir
+            plat = joinpath(dir, "bin"); mkpath(plat); touch(joinpath(plat, "_core"))
+            withenv("COMPILEIQ_CORE" => dir) do
+                # core "installed" → ptxas is the next requirement, whatever its state
+                info = sprint(CompileIQ.versioninfo)
+                @test occursin("CompileIQ.jl v", info) && occursin("core: compileiq $(CompileIQ.CORE_VERSION)", info)
+                @test occursin(dir, info) && occursin("search spaces: ", info) && occursin("ptxas: ", info)
+            end
+            write(joinpath(dir, "core-manifest.json"), """{"core_commit":"a5a0b8b9414ea62d1d4f6d6bca8dd8904f9518bd","built_at":"2026-08-14T22:16:52Z"}""")
+            @test CompileIQ._core_build(dir) == "commit a5a0b8b, built 2026-08-14"
+        end
+        info = sprint(CompileIQ.versioninfo)
+        @test occursin(r"core: (compileiq|not installed)", info)
+    end
+
     @testset "ACF" begin
         acf = ACF("c9e5b121")
         @test acf.bytes == UInt8[0xc9, 0xe5, 0xb1, 0x21]
@@ -36,11 +71,20 @@ end
 
     @testset "SearchConfig" begin
         cfg = SearchConfig()
-        @test cfg.generations == 5 && cfg.problem_type === :min && cfg.pool_size === nothing
+        @test cfg.generations == 5 && cfg.problem_type === :min
+        # derived sizes, same rule as the Python client
+        @test (cfg.pool_size, cfg.cull_size) == (32, 24)
+        @test (c -> (c.pool_size, c.cull_size))(SearchConfig(pool_size=16)) == (16, 12)
+        @test (c -> (c.pool_size, c.cull_size))(SearchConfig(pool_size=6)) == (6, 2)
+        @test (c -> (c.pool_size, c.cull_size))(SearchConfig(pool_size=7)) == (7, 4)
+        @test (c -> (c.pool_size, c.cull_size))(SearchConfig(num_objectives=3)) == (32, 24)
+        @test (c -> (c.pool_size, c.cull_size))(SearchConfig(num_objectives=20)) == (164, 122)
         @test_throws ArgumentError SearchConfig(generations=0)
         @test_throws ArgumentError SearchConfig(problem_type=:maximize)
         @test_throws ArgumentError SearchConfig(pool_size=4)
         @test_throws ArgumentError SearchConfig(cull_size=3)
+        @test_throws ArgumentError SearchConfig(pool_size=8, cull_size=8)
+        @test_throws ArgumentError SearchConfig(pool_size=8, cull_size=6)      # only 2 survivors
         @test_throws ArgumentError SearchConfig(mutate_rate=1.0)
         @test_throws ArgumentError SearchConfig(num_objectives=2, objective_weights=[1.0])
 
@@ -50,7 +94,7 @@ end
         @test d["dna_config"] == "/tmp/ss.json"
         @test d["normalize"] === false && d["enable_result_file"] === false
         @test !any(v -> v === nothing, values(d))
-        @test !haskey(CompileIQ.core_config(SearchConfig(), "x"), "pool_size")
+        @test CompileIQ.core_config(SearchConfig(), "x")["cull_size"] == 24
         @test CompileIQ.core_config(SearchConfig(), ["a", "b"])["dna_config"] == ["a", "b"]
     end
 
@@ -172,11 +216,14 @@ end
                   maximum(c.scores[1] for c in result)
             @test occursin("2 generations, 12 candidates, 12 valid", sprint(show, result))
 
-            # invalid candidates: missing, exceptions, non-finite
-            result = search(space; generations=1, pool_size=6, progress=false) do p
-                p["y"] == 1 && return missing
-                p["y"] == 2 && error("boom")
-                Inf
+            # invalid candidates: missing, exceptions, non-finite. The exception
+            # path logs a warning per throwing candidate; capture it.
+            result = @test_logs (:warn, r"objective threw") match_mode=:any begin
+                search(space; generations=1, pool_size=6, progress=false) do p
+                    p["y"] == 1 && return missing
+                    p["y"] == 2 && error("boom")
+                    Inf
+                end
             end
             @test count(isvalid, result) == 0
             @test best(result) === nothing
@@ -190,12 +237,14 @@ end
             mktempdir() do dir
                 bin = joinpath(dir, "space.bin"); write(bin, rand(UInt8, 32))
                 calls = Threads.Atomic{Int}(0)
-                result = search(SearchSpaceFile(bin); generations=1, pool_size=6, num_objectives=2,
+                # 2 objectives need 5 survivors, so a pool of 6 is rejected (as in Python)
+                @test_throws ArgumentError SearchConfig(pool_size=6, num_objectives=2)
+                result = search(SearchSpaceFile(bin); generations=1, pool_size=8, num_objectives=2,
                                 progress=false, map=asyncmap) do acf
                     Threads.atomic_add!(calls, 1)
                     (length(acf.bytes), acf.bytes[1])
                 end
-                @test calls[] == 6
+                @test calls[] == 8
                 @test all(c -> c.params isa ACF && length(c.scores) == 2, result)
                 @test all(c -> c.scores[1] == 16.0, result)
                 @test best(result; objective=2).scores[2] == minimum(c.scores[2] for c in result)
@@ -297,6 +346,49 @@ end
         end
     end
 
+    # Launch ptxas output on a GPU. Skipped without a functional CUDA setup.
+    @testset "device" begin
+        ptxas_ok = try
+            CompileIQ.ptxas_version() >= v"13.3"
+        catch
+            false
+        end
+        if !(CUDACore.functional() && ptxas_ok)
+            @info "skipping CompileIQ device tests (CUDA functional: $(CUDACore.functional()), ptxas ≥ 13.3: $ptxas_ok)"
+        else
+            ptx = read(joinpath(@__DIR__, "saxpy.ptx"), String)
+            n = 1 << 20
+            xh, yh, a = rand(Float32, n), rand(Float32, n), 2.0f0
+            ref = a .* xh .+ yh
+            x, y = CuArray(xh), CuArray(yh)
+            argtypes = Tuple{CuPtr{Float32}, CuPtr{Float32}, Float32, UInt32}
+            launch(fn) = cudacall(fn, argtypes, pointer(x), pointer(y), a, UInt32(n);
+                                  threads=256, blocks=cld(n, 256))
+            run_saxpy(cubin) = (copyto!(y, yh); launch(CuFunction(CuModule(cubin), "saxpy")); synchronize(); Array(y))
+
+            cubin, _ = ptxas(ptx; arch="sm_" * string(capability(device()).major) * string(capability(device()).minor))
+            @test run_saxpy(cubin) ≈ ref
+
+            # A runtime objective through the real core, when it is installed.
+            if CompileIQ.core_available()
+                arch = "sm_" * string(capability(device()).major) * string(capability(device()).minor)
+                pack = booster_pack("debug"; tag="booster-packs-2026.05.27")
+                @test run_saxpy(first(ptxas(ptx; arch, acf=pack["ptxas_opt0"]))) ≈ ref
+
+                result = search(PtxasSearchSpace(); generations=2, pool_size=6, progress=false) do acf
+                    cub = try first(ptxas(ptx; arch, acf, timeout=60)) catch e; e isa PtxasError && return missing; rethrow() end
+                    fn = CuFunction(CuModule(cub), "saxpy")
+                    copyto!(y, yh); launch(fn); synchronize()
+                    Array(y) ≈ ref || return missing
+                    launch(fn); synchronize()
+                    minimum(CUDACore.@elapsed(launch(fn)) for _ in 1:20)
+                end
+                @test count(isvalid, result) >= 1
+                @test best(result).scores[1] > 0
+            end
+        end
+    end
+
     # Real core + real search space + real ptxas. Skipped unless the core is
     # already installed (no downloads from the test suite).
     @testset "integration" begin
@@ -319,7 +411,7 @@ end
             cubin2, _ = ptxas(ptx; arch="sm_89", acf=samples[1], timeout=60)
             @test !isempty(cubin2)
 
-            result = search(PtxasSearchSpace(); generations=2, pool_size=6, cull_size=2, progress=false) do acf
+            result = search(PtxasSearchSpace(); generations=2, pool_size=6, progress=false) do acf   # cull_size derived
                 _, log = ptxas(ptx; arch="sm_89", acf, timeout=60)
                 spill_bytes(log)
             end

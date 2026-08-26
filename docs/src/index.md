@@ -11,6 +11,13 @@ the autotuner for the internal controls of `ptxas` and `nvcc`.
 CompileIQ
 ```
 
+## Setup
+
+```@docs
+functional
+versioninfo
+```
+
 ## Searching
 
 ```@docs

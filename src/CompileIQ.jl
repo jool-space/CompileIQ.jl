@@ -15,7 +15,7 @@ closure running in the process that owns your CUDA context.
 
     result = search(PtxasSearchSpace("13.3"); generations=10, pool_size=16) do acf
         cubin, log = ptxas(ptx; arch="sm_89", acf)   # throws PtxasError on failure
-        spill_bytes(log)                              # lower is better
+        CompileIQ.spill_bytes(log)                    # lower is better
     end
     write("best.acf", best(result).params)
 
@@ -41,11 +41,17 @@ using Preferences: @load_preference
 import CUDA_Compiler_jll
 import p7zip_jll
 
-export ACF
-export PtxasSearchSpace, NvccSearchSpace, SearchSpaceFile, ParamSpace, Range, Choice, Literal
-export SearchConfig, SearchResult, Candidate, search, sample, best
-export ptxas, PtxasError, spill_bytes
-export BoosterPack, write_booster_pack, read_booster_pack, booster_pack
+# Exported: what a session types. Everything else in the API is `public` and
+# used qualified, e.g. `CompileIQ.ParamSpace`, `CompileIQ.booster_pack`.
+export search, best, ACF, PtxasSearchSpace, ptxas, PtxasError
+
+public functional, versioninfo
+public sample, SearchConfig, SearchResult, Candidate, score
+public AbstractSearchSpace, NvccSearchSpace, SearchSpaceFile, ParamSpace, Range, Choice, Literal
+public search_space_file, search_space_json, materialize, decode, DEFAULT_SEARCH_SPACES_TAG
+public hex, ptxas_path, ptxas_version, spill_bytes
+public BoosterPack, write_booster_pack, read_booster_pack, booster_pack, DEFAULT_BOOSTER_PACKS_TAG
+public core_dir, core_available, install_core!, core_launcher, core_config, CORE_VERSION
 
 include("acf.jl")
 include("core.jl")
@@ -54,5 +60,6 @@ include("config.jl")
 include("search.jl")
 include("ptxas.jl")
 include("boosterpack.jl")
+include("diagnostics.jl")
 
 end
