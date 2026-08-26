@@ -1,13 +1,30 @@
 name = "CompileIQ"
 uuid = "4b2b6ecf-6568-42de-a118-30d12bf9bad6"
-authors = ["AntonOresten <antonoresten@proton.me> and contributors"]
-version = "1.0.0-DEV"
+authors = ["AntonOresten <antonoresten@proton.me>"]
+version = "0.1.0"
+
+[workspace]
+projects = ["test", "docs"]
+
+[deps]
+Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+CUDA_Compiler_jll = "d1e2174e-dfdc-576e-b43e-73b79eb1aca8"
+Downloads = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Preferences = "21216c6a-2e73-6563-6e65-726566657250"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Scratch = "6c6a2e73-6563-6170-7368-637461726353"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+p7zip_jll = "3f19e933-33d8-53b3-aaab-bd5110c3b7a0"
 
 [compat]
+Base64 = "1"
+CUDA_Compiler_jll = "0.4.4, 0.5"
+Downloads = "1"
+JSON = "1"
+Preferences = "1.4"
+SHA = "0.7"
+Scratch = "1.2"
+Sockets = "1"
 julia = "1.11"
-
-[extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[targets]
-test = ["Test"]
+p7zip_jll = "17"
