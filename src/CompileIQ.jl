@@ -1,33 +1,22 @@
 """
     CompileIQ
 
-Pure-Julia client for NVIDIA CompileIQ, the compiler autotuner behind
-`ptxas --apply-controls`.
-
-CompileIQ's optimizer is a closed binary (`_core`) that NVIDIA ships inside the
-`compileiq` Python wheel. The wheel's Python package is only a thin client
-that talks to that binary over a localhost socket. This package replaces the
-Python client: it fetches the wheel, extracts the core, and speaks the same
-newline-delimited JSON protocol, so an objective function is an ordinary Julia
-closure running in the process that owns your CUDA context.
-
-    using CompileIQ
+Julia client for NVIDIA CompileIQ, the autotuner for `ptxas`/`nvcc` compiler
+controls (`--apply-controls`). Drives NVIDIA's optimizer binary over its
+socket protocol; objectives are Julia closures.
 
     result = search(PtxasSearchSpace("13.3"); generations=10, pool_size=16) do acf
-        cubin, log = ptxas(ptx; arch="sm_89", acf)   # throws PtxasError on failure
-        CompileIQ.spill_bytes(log)                    # lower is better
+        cubin, log = ptxas(ptx; arch="sm_89", acf)
+        CompileIQ.spill_bytes(log)
     end
     write("best.acf", best(result).params)
 
-Objectives receive an [`ACF`](@ref) for compiler search spaces, a nested
-`Dict{String,Any}` for a [`ParamSpace`](@ref), or a `Vector` of those for a
-mixed space. Return a `Real` (or a tuple of them for multi-objective search),
-or `missing` to mark the candidate invalid. Exceptions thrown by the objective
-are treated as invalid candidates by default.
+Objectives receive an [`ACF`](@ref) for compiler spaces, a `Dict{String,Any}`
+for a [`ParamSpace`](@ref), or a `Vector` of those for a mixed space, and
+return a `Real`, a tuple for multiple objectives, or `missing` for an invalid
+candidate.
 
-The core binary and search spaces are NVIDIA proprietary software, downloaded
-from PyPI/GitHub on first use under NVIDIA's license; this package does not
-redistribute them. See [`install_core!`](@ref).
+Requires a one-time [`install_core!`](@ref); see [`functional`](@ref).
 """
 module CompileIQ
 
@@ -41,8 +30,6 @@ using Preferences: @load_preference
 import CUDA_Compiler_jll
 import p7zip_jll
 
-# Exported: what a session types. Everything else in the API is `public` and
-# used qualified, e.g. `CompileIQ.ParamSpace`, `CompileIQ.booster_pack`.
 export search, best, ACF, PtxasSearchSpace, ptxas, PtxasError
 
 public functional, versioninfo

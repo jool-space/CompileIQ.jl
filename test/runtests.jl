@@ -179,6 +179,15 @@ end
             end
             withenv("COMPILEIQ_CORE" => joinpath(dir, "nope")) do
                 @test_throws ErrorException CompileIQ.core_dir()
+                @test !CompileIQ.functional()
+            end
+            # no core anywhere → core_dir throws with install instructions, never downloads
+            withenv("COMPILEIQ_CORE" => nothing) do
+                scratch = CompileIQ._scratch_core_dir()
+                if !isfile(joinpath(scratch, "bin", "_core"))
+                    @test !CompileIQ.core_available()
+                    @test_throws r"install_core!" CompileIQ.core_dir()
+                end
             end
         end
     end

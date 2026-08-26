@@ -37,14 +37,11 @@ const SEARCH_SPACES_REPO = "NVIDIA/CompileIQ"
 """
     PtxasSearchSpace(version="13.3"; variant=:default, tag=DEFAULT_SEARCH_SPACES_TAG)
 
-NVIDIA's published control space for `ptxas` from CUDA toolkit `version`.
-`variant=:att` selects the curated attention-kernel subset. Objectives receive
-an [`ACF`](@ref). The `.bin` is fetched from the `tag` release on first use and
-cached; set the `search_spaces_dir` preference or `COMPILEIQ_SEARCH_SPACES_DIR`
-to a directory holding `manifest.json` and the `.bin` files to work offline.
-
-Requires a `ptxas` of at least the same toolkit version to apply the results
-(`--apply-controls` first shipped in CUDA 13.3).
+NVIDIA's control space for `ptxas` from CUDA toolkit `version`
+(`variant=:att` is the curated attention-kernel subset). Objectives receive
+an [`ACF`](@ref). Fetched from the `tag` release on first use; the
+`search_spaces_dir` preference or `COMPILEIQ_SEARCH_SPACES_DIR` names an
+offline mirror holding `manifest.json` and the `.bin` files.
 """
 struct PtxasSearchSpace <: AbstractSearchSpace
     version::String

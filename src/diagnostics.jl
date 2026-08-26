@@ -1,13 +1,9 @@
-# `functional` and `versioninfo`, in the CUDA.jl idiom: one call to find out
-# whether a search can run here, and one to paste into a bug report.
 
 """
     functional(show_reason=false) -> Bool
 
-Whether a search can run on this machine: a supported platform, an installed
-core ([`core_available`](@ref); nothing is downloaded), and a `ptxas` new
-enough for `--apply-controls` (13.3). With `show_reason=true` the first
-failing requirement is logged.
+Whether a search can run here: supported platform, installed core, and
+`ptxas` ≥ 13.3. `show_reason=true` logs the first failing requirement.
 """
 function functional(show_reason::Bool=false)
     reason = _nonfunctional_reason()
@@ -38,15 +34,13 @@ end
 """
     versioninfo([io::IO])
 
-Print the package version, the core binary in use (and its build, when the
-wheel's manifest is present), the `ptxas` it will drive, and which
-search-space and booster-pack catalogs are pinned.
+Print the package version, core, `ptxas`, and pinned catalogs.
 """
 function versioninfo(io::IO=stdout)
     println(io, "CompileIQ.jl v", pkgversion(@__MODULE__))
 
     core = try
-        core_dir(install=false)
+        _find_core_dir()
     catch err
         println(io, "  core: error — ", sprint(showerror, err))
         nothing

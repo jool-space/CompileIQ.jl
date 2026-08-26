@@ -1,15 +1,11 @@
-# The optimizer itself. NVIDIA ships it only as `_core` (a ~90 MB Racket
-# executable) plus `libciq.so`, bundled inside the `compileiq` Python wheel under
-# an NVIDIA Software License Agreement that permits installing and using it but
-# not redistributing it. So there is no JLL: the user's machine downloads the
-# wheel from PyPI on first use, and only the core's files are extracted.
+# The optimizer binary (`_core` + `libciq.so`) from NVIDIA's `compileiq` wheel.
+# Its license does not allow redistribution, so it is installed per machine
+# into scratch space rather than shipped as an artifact.
 
 """
     CORE_VERSION
 
-Version of the `compileiq` wheel whose core this package is pinned to. The
-wire protocol is undocumented, so the binary is pinned by URL and SHA-256
-rather than tracked as "latest".
+Version of the `compileiq` wheel this package's core is pinned to.
 """
 const CORE_VERSION = v"1.0.3"
 
@@ -54,16 +50,21 @@ end
 _scratch_core_dir() = joinpath(@get_scratch!("core"), string(CORE_VERSION), _wheel_platform_dir(_core_arch()))
 
 """
-    core_dir(; install=true) -> Union{String,Nothing}
+    core_dir() -> String
 
-Directory containing `bin/_core` and `lib/libciq.so`. Resolved, in order, from
-the `core` preference, the `COMPILEIQ_CORE` environment variable (either may
-name the `_core` file, its directory, or a pip `compileiq` package directory),
-then this package's scratch space. With `install=true` (the default) a missing
-scratch install is created by [`install_core!`](@ref); otherwise `nothing` is
-returned when no core is found.
+Directory holding `bin/_core` and `lib/libciq.so`: the `core` preference,
+`COMPILEIQ_CORE` (either may name the `_core` file, its directory, or a pip
+`compileiq` package directory), or the scratch install from
+[`install_core!`](@ref). Throws if none exists.
 """
-function core_dir(; install::Bool=true)
+function core_dir()
+    dir = _find_core_dir()
+    dir === nothing && error("CompileIQ core not installed; run `CompileIQ.install_core!()` " *
+                             "or point the `core` preference / COMPILEIQ_CORE at an existing install")
+    return dir
+end
+
+function _find_core_dir()
     for (source, value) in (("preference `core`", @load_preference("core", nothing)),
                             ("COMPILEIQ_CORE", get(ENV, "COMPILEIQ_CORE", nothing)))
         value === nothing && continue
@@ -72,29 +73,23 @@ function core_dir(; install::Bool=true)
         return dir
     end
     dir = _scratch_core_dir()
-    isfile(joinpath(dir, "bin", "_core")) && return dir
-    install || return nothing
-    install_core!()
+    return isfile(joinpath(dir, "bin", "_core")) ? dir : nothing
 end
 
 """
     core_available() -> Bool
 
-Whether a core binary is already installed (without triggering a download).
+Whether a core binary is installed.
 """
-core_available() = core_dir(install=false) !== nothing
+core_available() = _find_core_dir() !== nothing
 
 """
     install_core!(; force=false) -> String
 
 Download the pinned `compileiq` wheel ([`CORE_VERSION`](@ref)) from PyPI,
-verify its SHA-256, and extract the core binary into this package's scratch
-space. Returns the core directory. Already-installed cores are kept unless
-`force=true`.
-
-The wheel is NVIDIA proprietary software; downloading it means accepting the
-NVIDIA Software License Agreement bundled with it, which is extracted alongside
-the binary as `LICENSE`.
+verify its SHA-256, and extract the core into scratch space; returns its
+directory. NVIDIA's license is extracted alongside as `LICENSE`. An existing
+install is kept unless `force=true`.
 """
 function install_core!(; force::Bool=false)
     arch = _core_arch()
@@ -104,8 +99,7 @@ function install_core!(; force::Bool=false)
         return dir
     end
     url, expected = CORE_WHEELS[arch]
-    @info "Downloading NVIDIA CompileIQ $(CORE_VERSION) from PyPI (~34 MB). The core binary is proprietary " *
-          "and licensed to you under the NVIDIA Software License Agreement shipped in the wheel." url
+    @info "Downloading NVIDIA CompileIQ $(CORE_VERSION) from PyPI (~34 MB)" url
     mktempdir() do tmp
         wheel = joinpath(tmp, "compileiq.whl")
         Downloads.download(url, wheel)
@@ -126,16 +120,14 @@ function install_core!(; force::Bool=false)
     manifest = joinpath(dest, "compileiq", "core", "executable", "core-manifest.json")
     isfile(manifest) && cp(manifest, joinpath(dir, "core-manifest.json"); force=true)
     isfile(joinpath(dir, "bin", "_core")) || error("wheel extraction did not produce $(joinpath(dir, "bin", "_core"))")
+    @info "CompileIQ core installed" dir license = joinpath(dir, "LICENSE")
     return dir
 end
 
 """
     core_launcher
 
-Testing hook. When set to a function `config_path -> Cmd`, [`search`](@ref)
-runs that command instead of the real core. The command must implement the
-core's side of the protocol (connect to `CIQ_HOST:CIQ_PORT`, stream candidate
-generations, read scores, send `{"complete":1}`).
+Testing hook: a function `config_path -> Cmd` run in place of the real core.
 """
 const core_launcher = Ref{Any}(nothing)
 

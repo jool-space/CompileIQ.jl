@@ -1,7 +1,4 @@
-# Booster packs: curated ACFs for a workload family, distributed as a zip
-# holding one directory with `booster-pack-manifest.json` and the `.acf`
-# files. NVIDIA publishes a catalog of them as GitHub release assets; the same
-# format is used here to package the results of your own searches.
+# Booster packs: NVIDIA's zip format for curated ACFs.
 #
 #   booster-pack-<name>.zip
 #   └── booster-pack-<name>/
@@ -18,8 +15,7 @@ const DEFAULT_BOOSTER_PACKS_TAG = "booster-packs-2026.08.18"
 
 const MANIFEST_NAME = "booster-pack-manifest.json"
 
-# Condition of the NVIDIA Software License Agreement for distributing ACFs
-# ("Software Outputs"): the notice must accompany them.
+# NVIDIA's license requires this notice on distributed ACFs.
 const NVIDIA_OUTPUT_NOTICE = "© NVIDIA Corporation, 2026."
 
 const DEFAULT_CAVEATS = [
@@ -30,14 +26,9 @@ const DEFAULT_CAVEATS = [
 """
     BoosterPack
 
-A read booster pack: its `manifest` (the `booster-pack-manifest.json`
-document as a `Dict`) and its `acfs`, a vector of `name => ACF` pairs in
-manifest order, where `name` is the file name without `.acf`.
-
-    pack = booster_pack("debug")
-    pack["ptxas_opt0"]                     # an ACF
-    for (name, acf) in pack ... end
-    pack.manifest["cuda_version"]
+A read booster pack: `manifest` (the `booster-pack-manifest.json` document)
+and `acfs`, `name => ACF` pairs in manifest order. Index with `pack[name]`,
+iterate, or `keys(pack)`.
 """
 struct BoosterPack
     manifest::Dict{String,Any}
@@ -68,26 +59,16 @@ _stages(stage::AbstractString) = stage == "both" ? ["nvcc", "ptxas"] : [String(s
 """
     write_booster_pack(dest, acfs; pack_id, cuda_version, supported_gpus, kwargs...) -> dest
 
-Package `acfs` — an iterable of `name => ACF` pairs, e.g. from
-`best(result).params` of several searches — as a booster pack in NVIDIA's
-format. `dest` ending in `.zip` produces a zip whose single top-level
-directory is named after the file (`booster-pack-x.zip` → `booster-pack-x/`);
-otherwise `dest` is written as a directory.
+Write `acfs` (`name => ACF` pairs) as a booster pack: a `.zip` whose top-level
+directory is named after the file, or a directory otherwise.
 
-Required keywords: `pack_id` (e.g. `"jool-decode"`), `cuda_version` (the
-toolkit whose `ptxas`/`nvcc` produced the ACFs; ACFs are not portable across
-versions) and `supported_gpus` (e.g. `["RTX 6000 Ada"]`, or `["ALL"]`).
-
+Keywords mirror NVIDIA's manifest. Required: `pack_id`, `cuda_version` (ACFs
+only load in the toolkit version that produced them), `supported_gpus`.
 Optional: `display_name`, `description`, `created_by`, `pack_type`
-(`"performance"` or `"diagnostic"`), `controls_stage` (`"ptxas"`, `"nvcc"`
-or `"both"`; default `"ptxas"`), `descriptions` (a `Dict` from ACF name to
-text), `caveats`, `validation_summary` (a `Dict`; omitted unless given —
-don't claim validation you didn't do), `release_tag`, and `notice`. ACFs are
-NVIDIA "Software Outputs", and the NVIDIA Software License Agreement requires
-the copyright notice `"$(NVIDIA_OUTPUT_NOTICE)"` to accompany distributed
-ones; it is recorded in the manifest as `notice` by default.
-
-Read the result back with [`read_booster_pack`](@ref).
+(`"performance"`/`"diagnostic"`), `controls_stage` (`"ptxas"`/`"nvcc"`/`"both"`),
+`descriptions` (name → text), `caveats`, `validation_summary`, `release_tag`,
+and `notice` (defaults to the copyright notice NVIDIA's license requires on
+distributed ACFs).
 """
 function write_booster_pack(dest::AbstractString, acfs;
                             pack_id::AbstractString, cuda_version::AbstractString,
@@ -163,9 +144,8 @@ end
 """
     read_booster_pack(path) -> BoosterPack
 
-Read a booster pack from a `.zip` or from a directory containing
-`booster-pack-manifest.json`. Every ACF is checked against the manifest's
-size and SHA-256; ACF files not listed in the manifest are ignored.
+Read a booster pack from a `.zip` or a directory, checking each ACF against
+the manifest's size and SHA-256.
 """
 function read_booster_pack(path::AbstractString)
     isdir(path) && return _read_pack_dir(path)
@@ -204,20 +184,14 @@ end
 """
     booster_pack(name; tag=DEFAULT_BOOSTER_PACKS_TAG) -> BoosterPack
 
-Download (once; cached in scratch space) and read NVIDIA's `booster-pack-<name>.zip`
-from the `tag` catalog release, verifying it against the release's
-`booster-pack-catalog.json`. Available names are listed in the error when
-`name` is unknown; at the default tag they are `"helion"` and `"debug"`.
+Download (cached) and read NVIDIA's `booster-pack-<name>.zip` from the `tag`
+catalog release, verified against its `booster-pack-catalog.json`. Names at
+the default tag: `"helion"`, `"debug"`.
 
-ACFs only load in the toolkit version they were made for: the packs at the
-default tag target CUDA 13.4 and a 13.3 `ptxas` rejects them with "Invalid
-compiler controls file", while `tag="booster-packs-2026.05.27"` holds the
-13.3 builds. Check `pack.manifest["cuda_version"]` against
-[`ptxas_version`](@ref).
-
-The debug pack is handy as a canary: `ptxas_opt0` should slow a kernel down
-and `ptxas_opt3` should leave it unchanged, which proves the ACF actually
-reaches `ptxas`.
+ACFs load only in the toolkit version they were built for
+(`pack.manifest["cuda_version"]`): the default tag targets CUDA 13.4,
+`"booster-packs-2026.05.27"` targets 13.3. The debug pack's `ptxas_opt0` /
+`ptxas_opt3` make a useful canary that an ACF reaches `ptxas`.
 """
 function booster_pack(name::AbstractString; tag::AbstractString=DEFAULT_BOOSTER_PACKS_TAG)
     dir = joinpath(@get_scratch!("booster-packs"), tag)
