@@ -3,7 +3,8 @@
     functional(show_reason=false) -> Bool
 
 Whether a search can run here: supported platform, installed core, and
-`ptxas` ≥ 13.3. `show_reason=true` logs the first failing requirement.
+`ptxas` ≥ 13.3. Does not install the core; the first search or sample does.
+`show_reason=true` logs the first failing requirement.
 """
 function functional(show_reason::Bool=false)
     reason = _nonfunctional_reason()
@@ -20,7 +21,7 @@ function _nonfunctional_reason()
     catch err
         return "core lookup failed: $(sprint(showerror, err))"
     end
-    available || return "the core binary is not installed; run CompileIQ.install_core!()"
+    available || return "the core will be installed on first search or sample; prefetch with CompileIQ.install_core!()"
     CUDA_Compiler_jll.is_available() || return "CUDA_Compiler_jll provides no ptxas on this platform"
     version = try
         ptxas_version()
@@ -46,7 +47,7 @@ function versioninfo(io::IO=stdout)
         nothing
     end
     if core === nothing
-        println(io, "  core: not installed (wheel compileiq ", CORE_VERSION, "; run CompileIQ.install_core!())")
+        println(io, "  core: not installed (wheel compileiq ", CORE_VERSION, "; installs on first search or sample)")
     else
         build = _core_build(core)
         println(io, "  core: compileiq ", CORE_VERSION, build === nothing ? "" : " ($build)", " at ", core)

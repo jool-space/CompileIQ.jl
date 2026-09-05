@@ -192,26 +192,48 @@ end
 Literal(value; knockout=nothing) = Literal(value, _knockout_threshold(knockout))
 
 """
+    ParamSpace(; params...)
     ParamSpace(pairs...)
 
 User-defined search space over named parameters, for co-tuning application
 parameters with (or without) a compiler space:
 
     space = ParamSpace(
-        "tile" => Choice(64, 128, 256),
-        "stages" => Range(2, 6),
-        "load" => ParamSpace("latency" => Choice(1, 4, 8)),   # nesting is allowed
+        tile=Choice(64, 128, 256),
+        stages=Range(2, 6),
+        load=ParamSpace(latency=Choice(1, 4, 8)),
     )
 
-Objectives receive a `Dict{String,Any}` with the same nesting; knocked-out
-parameters are absent.
+Access parameter descriptors as `space.tile` or `space.load.latency`.
+Objectives receive a `NamedTuple` with the same nesting and declaration order,
+so sampled values support `params.tile` and `params.load.latency` too.
+Knocked-out parameters are absent; use `hasproperty(params, :tile)` or
+`get(params, :tile, default)` when a parameter may be omitted.
+
+Pairs with string or symbol names are also accepted, as is a `NamedTuple`
+of descriptors. Parameter names must be unique.
 """
 struct ParamSpace <: AbstractSearchSpace
     params::Vector{Pair{String,Union{Param,ParamSpace}}}
 end
-ParamSpace(pairs::Pair...) = ParamSpace(Pair{String,Union{Param,ParamSpace}}[String(k) => v for (k, v) in pairs])
+function ParamSpace(pairs::Pair...; kwargs...)
+    params = Pair{String,Union{Param,ParamSpace}}[String(k) => v for (k, v) in pairs]
+    append!(params, (String(k) => v for (k, v) in kwargs))
+    allunique(first.(params)) || throw(ArgumentError("parameter names must be unique"))
+    ParamSpace(params)
+end
+ParamSpace(params::NamedTuple) = ParamSpace(; params...)
 
-Base.:(==)(a::ParamSpace, b::ParamSpace) = a.params == b.params
+function Base.getproperty(space::ParamSpace, name::Symbol)
+    for (key, param) in getfield(space, :params)
+        key == String(name) && return param
+    end
+    throw(ErrorException("ParamSpace has no parameter $(repr(name))"))
+end
+Base.propertynames(space::ParamSpace, private::Bool=false) =
+    Tuple(Symbol(name) for (name, _) in getfield(space, :params))
+
+Base.:(==)(a::ParamSpace, b::ParamSpace) = getfield(a, :params) == getfield(b, :params)
 Base.:(==)(a::Range, b::Range) = (a.low, a.high, a.step, a.seed, a.knockout) == (b.low, b.high, b.step, b.seed, b.knockout)
 Base.:(==)(a::Choice, b::Choice) = (a.vals, a.knockout) == (b.vals, b.knockout)
 Base.:(==)(a::Literal, b::Literal) = (a.value, a.knockout) == (b.value, b.knockout)
@@ -241,7 +263,7 @@ function _param_json(p::Literal)
 end
 
 function _flatten!(classes, layout, space::ParamSpace, prefix::String)
-    for (name, p) in space.params
+    for (name, p) in getfield(space, :params)
         key = isempty(prefix) ? encode_key(name) : prefix * "_" * encode_key(name)
         if p isa ParamSpace
             _flatten!(classes, layout, p, key)
@@ -310,7 +332,7 @@ function decode(::SearchSpaceFile, knobs::AbstractString)
     return String(knobs)
 end
 
-function decode(::ParamSpace, knobs::AbstractString)
+function decode(space::ParamSpace, knobs::AbstractString)
     flat = JSON.parse(knobs; dicttype=Dict{String,Any})
     flat isa Dict || error("expected a JSON object for a ParamSpace candidate, got: $(repr(knobs))")
     restored = Dict{String,Any}()
@@ -322,7 +344,17 @@ function decode(::ParamSpace, knobs::AbstractString)
         end
         node[path[end]] = value
     end
-    restored
+    _named_params(space, restored)
+end
+
+# Follow the declaration order rather than the JSON object's iteration order.
+# Only recurse through nested spaces: a Choice's value need not be a scalar.
+function _named_params(space::ParamSpace, restored::Dict{String,Any})
+    params = getfield(space, :params)
+    all(name -> any(p -> first(p) == name, params), keys(restored)) ||
+        error("candidate contains an unknown parameter")
+    (; (Symbol(name) => (param isa ParamSpace ? _named_params(param, restored[name]) : restored[name])
+        for (name, param) in params if haskey(restored, name))...)
 end
 
 function decode(spaces::AbstractVector, knobs::AbstractString)

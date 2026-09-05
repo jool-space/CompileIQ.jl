@@ -26,7 +26,8 @@ end
         @test exported == Set([:CompileIQ, :search, :best, :ACF, :PtxasSearchSpace, :ptxas, :PtxasError])
         for name in (:functional, :versioninfo, :sample, :SearchConfig, :ParamSpace, :Range, :Choice, :Literal,
                      :NvccSearchSpace, :SearchSpaceFile, :spill_bytes, :ptxas_version, :booster_pack,
-                     :write_booster_pack, :read_booster_pack, :install_core!, :core_available)
+                     :write_booster_pack, :read_booster_pack, :install_core!, :core_available,
+                     :Session, :Batch, :Proposal, :receive, :submit!, :CoreTimeoutError)
             @test Base.ispublic(CompileIQ, name) && !Base.isexported(CompileIQ, name)
         end
     end
@@ -123,6 +124,46 @@ end
         @test Choice([1, 2]) == Choice(1, 2)
     end
 
+    @testset "named parameters" begin
+        space = ParamSpace(tile=Choice(16, 32), load=ParamSpace(latency=Range(1, 4)),
+                           params=Literal(7))
+        paired = ParamSpace("tile" => Choice(16, 32), :load => ParamSpace(:latency => Range(1, 4)),
+                            :params => Literal(7))
+        @test space == paired
+        @test CompileIQ.search_space_json(space) == CompileIQ.search_space_json(paired)
+        @test space.tile == Choice(16, 32)
+        @test space.load.latency == Range(1, 4)
+        @test space.params == Literal(7)  # backing-field name is available to users
+        @test propertynames(space) == (:tile, :load, :params)
+        @test hasproperty(space, :tile) && !hasproperty(space, :absent)
+        @test_throws ErrorException space.absent
+        @test ParamSpace((tile=space.tile,)) == ParamSpace(tile=space.tile)
+        @test propertynames(ParamSpace()) == ()
+        @test_throws ArgumentError ParamSpace(:x => Literal(1), "x" => Literal(2))
+        @test_throws ArgumentError ParamSpace(:x => Literal(1); x=Literal(2))
+
+        # Wire order does not change the candidate's field order. Knockout
+        # removes fields, including a parent whose children were all omitted.
+        wire = JSON.json(Dict(base64encode("params") => 7,
+                              base64encode("load") * "_" * base64encode("latency") => 3,
+                              base64encode("tile") => 16))
+        candidate = CompileIQ.decode(space, wire)
+        @test candidate == (tile=16, load=(latency=3,), params=7)
+        @test candidate.load.latency == 3
+        @test propertynames(candidate) == propertynames(space)
+        partial = CompileIQ.decode(space, JSON.json(Dict(base64encode("params") => 7)))
+        @test partial == (params=7,)
+        @test !hasproperty(partial, :load) && get(partial, :tile, 32) == 32
+        @test CompileIQ.decode(space, "{}") == NamedTuple()
+        @test_throws ErrorException CompileIQ.decode(space, JSON.json(Dict(base64encode("unknown") => 1)))
+
+        # Underscores and Unicode still round-trip through the encoded wire keys.
+        oddspace = ParamSpace(tile_size=Literal(16), λ=ParamSpace(μ=Literal(2)))
+        wire = JSON.json(Dict(base64encode("tile_size") => 16,
+                              base64encode("λ") * "_" * base64encode("μ") => 2))
+        @test CompileIQ.decode(oddspace, wire) == (tile_size=16, λ=(μ=2,))
+    end
+
     @testset "decode" begin
         ptxas_space = PtxasSearchSpace()
         @test ptxas_space.version == "13.3" && ptxas_space.variant === :default
@@ -131,14 +172,14 @@ end
 
         space = ParamSpace("x" => Range(1, 2), "y" => Choice(1, 2), "b" => ParamSpace("c" => Literal(7)))
         params = CompileIQ.decode(space, """{"eA==": 1.5, "eQ==": 1, "$(base64encode("b"))_$(base64encode("c"))": 7}""")
-        @test params == Dict("x" => 1.5, "y" => 1, "b" => Dict("c" => 7))
-        @test params isa Dict{String,Any} && params["b"] isa Dict{String,Any}
-        @test CompileIQ.decode(space, """{"eA==": 1.5}""") == Dict("x" => 1.5)   # knocked-out y, b.c
+        @test params == (x=1.5, y=1, b=(c=7,))
+        @test params isa NamedTuple && params.b isa NamedTuple
+        @test CompileIQ.decode(space, """{"eA==": 1.5}""") == (x=1.5,)   # knocked-out y, b.c
         @test_throws ErrorException CompileIQ.decode(space, "[1,2]")
 
         mixed = [space, ptxas_space]
         knobs = JSON.json([base64encode("""{"eA==": 2}"""), base64encode("abcd")])
-        @test CompileIQ.decode(mixed, knobs) == Any[Dict("x" => 2), ACF("abcd")]
+        @test CompileIQ.decode(mixed, knobs) == Any[(x=2,), ACF("abcd")]
         @test_throws ErrorException CompileIQ.decode(mixed, JSON.json([base64encode("{}")]))
 
         file = SearchSpaceFile("/nonexistent/space.bin")
@@ -181,21 +222,26 @@ end
                 @test_throws ErrorException CompileIQ.core_dir()
                 @test !CompileIQ.functional()
             end
-            # no core anywhere → core_dir throws with install instructions, never downloads
+            # A lookup remains passive even though core_dir now installs on demand.
             withenv("COMPILEIQ_CORE" => nothing) do
-                scratch = CompileIQ._scratch_core_dir()
-                if !isfile(joinpath(scratch, "bin", "_core"))
+                if CompileIQ._find_core_dir() === nothing
                     @test !CompileIQ.core_available()
-                    @test_throws r"install_core!" CompileIQ.core_dir()
                 end
             end
         end
     end
 
+    include("core_install.jl")
+    include("session.jl")
+    include("parallel.jl")
+
     @testset "scores" begin
         @test CompileIQ._wire_scores(3, 1) == [3.0]
         @test CompileIQ._wire_scores(missing, 1) == ["*"]
         @test CompileIQ._wire_scores(NaN, 1) == ["*"]
+        @test CompileIQ._wire_scores(big"1e1000", 1) == ["*"]
+        @test CompileIQ._wire_scores(missing, 2) == ["*", "*"]
+        @test CompileIQ._wire_scores(nothing, 2) == ["*", "*"]
         @test CompileIQ._wire_scores((1, missing), 2) == [1.0, "*"]
         @test CompileIQ._wire_scores([1.0, 2.0], 2) == [1.0, 2.0]
         @test_throws ArgumentError CompileIQ._wire_scores((1, 2), 1)
@@ -205,18 +251,18 @@ end
 
     @testset "protocol (fake core)" begin
         with_fakecore() do
-            space = ParamSpace("x" => Range(1.0, 20.0; step=0.5), "y" => Choice(1, 2, 3),
-                               "z" => Literal("c"; knockout=0.5))
+            space = ParamSpace(x=Range(1.0, 20.0; step=0.5), y=Choice(1, 2, 3),
+                               z=Literal("c"; knockout=0.5))
             seen = Any[]
             result = search(space; generations=2, pool_size=6, cull_size=2, progress=false) do p
                 push!(seen, p)
-                p["x"]^2 + p["y"]
+                p.x^2 + p.y
             end
             @test result isa SearchResult
             @test length(result) == 12
             @test all(isvalid, result)
-            @test all(c -> c.params isa Dict{String,Any}, result)
-            @test count(p -> haskey(p, "z"), seen) == 6      # knocked out on odd ids
+            @test all(c -> c.params isa NamedTuple, result)
+            @test count(p -> hasproperty(p, :z), seen) == 6      # knocked out on odd ids
             @test [c.generation for c in result] == [fill(0, 6); fill(1, 6)]
             @test [c.id for c in result] == [0:5; 0:5]
             b = best(result)
@@ -229,8 +275,8 @@ end
             # path logs a warning per throwing candidate; capture it.
             result = @test_logs (:warn, r"objective threw") match_mode=:any begin
                 search(space; generations=1, pool_size=6, progress=false) do p
-                    p["y"] == 1 && return missing
-                    p["y"] == 2 && error("boom")
+                    p.y == 1 && return missing
+                    p.y == 2 && error("boom")
                     Inf
                 end
             end
@@ -260,8 +306,8 @@ end
 
                 # mixed space
                 result = search([space, SearchSpaceFile(bin)]; generations=1, pool_size=6, progress=false) do (p, acf)
-                    @test p isa Dict{String,Any} && acf isa ACF
-                    p["x"]
+                    @test p isa NamedTuple && acf isa ACF
+                    p.x
                 end
                 @test length(result) == 6 && all(isvalid, result)
                 @test all(c -> c.params isa Vector && length(c.params) == 2, result)
@@ -269,7 +315,7 @@ end
 
             # sample()
             samples = sample(space, 3)
-            @test length(samples) == 3 && all(s -> s isa Dict{String,Any}, samples)
+            @test length(samples) == 3 && all(s -> s isa NamedTuple, samples)
             @test_throws ArgumentError sample(space, 0)
 
             # config validation on the search entry point

@@ -11,12 +11,13 @@ socket protocol; objectives are Julia closures.
     end
     write("best.acf", best(result).params)
 
-Objectives receive an [`ACF`](@ref) for compiler spaces, a `Dict{String,Any}`
+Objectives receive an [`ACF`](@ref) for compiler spaces, a nested `NamedTuple`
 for a [`ParamSpace`](@ref), or a `Vector` of those for a mixed space, and
 return a `Real`, a tuple for multiple objectives, or `missing` for an invalid
 candidate.
 
-Requires a one-time [`install_core!`](@ref); see [`functional`](@ref).
+The core is installed automatically on first search or sample. Use
+[`install_core!`](@ref) to prefetch it; see [`functional`](@ref).
 """
 module CompileIQ
 
@@ -29,11 +30,13 @@ using Scratch: @get_scratch!
 using Preferences: @load_preference
 import CUDA_Compiler_jll
 import p7zip_jll
+import Pkg.Artifacts
 
 export search, best, ACF, PtxasSearchSpace, ptxas, PtxasError
 
 public functional, versioninfo
 public sample, SearchConfig, SearchResult, Candidate, score
+public Session, Batch, Proposal, receive, submit!, CoreTimeoutError
 public AbstractSearchSpace, NvccSearchSpace, SearchSpaceFile, ParamSpace, Range, Choice, Literal
 public search_space_file, search_space_json, materialize, decode, DEFAULT_SEARCH_SPACES_TAG
 public hex, ptxas_path, ptxas_version, spill_bytes
@@ -44,6 +47,7 @@ include("acf.jl")
 include("core.jl")
 include("spaces.jl")
 include("config.jl")
+include("session.jl")
 include("search.jl")
 include("ptxas.jl")
 include("boosterpack.jl")

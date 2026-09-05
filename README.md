@@ -11,7 +11,6 @@ NVIDIA's optimizer binary directly; objectives are Julia closures.
 
 ```julia
 using CompileIQ
-CompileIQ.install_core!()   # once
 
 ptx = read("kernel.ptx", String)
 
@@ -28,22 +27,60 @@ end
 write("best.acf", best(result).params)
 ```
 
-Objectives receive an `ACF` (compiler spaces), a `Dict{String,Any}`
+Objectives receive an `ACF` (compiler spaces), a nested `NamedTuple`
 (`CompileIQ.ParamSpace`), or a vector of those (mixed spaces), and return a
 `Real`, a tuple for multiple objectives, or `missing` for an invalid candidate.
+
+For application parameters, use keyword names and property access:
+
+```julia
+using CompileIQ: ParamSpace, Choice, Range
+
+space = ParamSpace(tile=Choice(64, 128, 256), stages=Range(2, 6))
+space.tile                         # Choice descriptor
+params = first(CompileIQ.sample(space, 1))
+params.tile                        # sampled value
+```
+
+Nested spaces produce nested named tuples. Parameters omitted by `knockout`
+are absent from the tuple; use `get(params, :name, default)` for a fallback.
 
 Booster packs — NVIDIA's zip format for curated ACFs — are read and written
 with `CompileIQ.booster_pack`, `CompileIQ.read_booster_pack` and
 `CompileIQ.write_booster_pack`. ACFs load only in the toolkit version that
 produced them.
 
+## Driving batches yourself
+
+`search` owns the objective loop. Use a `Session` when another engine or your
+own code should decide when to evaluate, submit, or stop:
+
+```julia
+using CompileIQ: Session, receive, submit!
+
+Session(PtxasSearchSpace("13.3"); generations=10, pool_size=16) do session
+    while (batch = receive(session)) !== nothing
+        scores = [objective(p.params) for p in batch]
+        submit!(session, batch, scores)
+    end
+end
+```
+
+Each batch carries candidate IDs, generation metadata, and its own sequence
+number. Submit one score per candidate in batch order. There can be only one
+outstanding batch; the do block closes the core even if you break or throw
+before submitting. `connect_timeout` and `io_timeout` bound core communication,
+with no timer running during candidate evaluation. See
+[examples/session.jl](examples/session.jl) for a numeric example.
+
 ## Requirements
 
 - Linux x86_64 or aarch64.
 - `ptxas` ≥ CUDA 13.3 (`CUDA_Compiler_jll` by default).
-- `CompileIQ.install_core!()`, once: downloads NVIDIA's `compileiq` wheel
-  from PyPI (SHA-pinned) and extracts the optimizer binary. Search spaces
-  and booster packs are fetched from NVIDIA's GitHub releases on demand.
+- The first `search` or `CompileIQ.sample` downloads NVIDIA's `compileiq`
+  wheel directly from PyPI (SHA-pinned) and extracts the optimizer into a
+  local Julia artifact. `CompileIQ.install_core!()` optionally prefetches it.
+  Search spaces and booster packs are fetched from NVIDIA's GitHub releases on demand.
   `CompileIQ.functional()` and `CompileIQ.versioninfo()` report the setup.
 
 ## License
@@ -51,6 +88,9 @@ produced them.
 This package is MIT and contains no NVIDIA code. The optimizer binary, search
 spaces and ACFs are covered by the
 [NVIDIA Software License Agreement](https://github.com/NVIDIA/CompileIQ/blob/main/LICENSE),
-extracted next to the binary on install. It does not permit redistributing
+extracted next to the binary on install along with its third-party notices.
+It does not permit redistributing
 the binary; ACFs may be distributed in binary form with the notice
 `© NVIDIA Corporation, 2026.`.
+
+See [THIRD_PARTY.md](THIRD_PARTY.md) for the download and artifact layout.

@@ -20,6 +20,7 @@ const config = JSON.parse(read(config_path, String))
 const dna = config.dna_config isa AbstractString ? [String(config.dna_config)] : String.(config.dna_config)
 const pool = get(config, "pool_size", 6)
 const num_objectives = get(config, "num_objectives", 1)
+const mode = get(ENV, "COMPILEIQ_FAKE_MODE", "normal")
 
 function payload(path, i)
     doc = try
@@ -57,23 +58,34 @@ end
 sock = connect(ENV["CIQ_HOST"], parse(Int, ENV["CIQ_PORT"]))
 # The client closes the socket when it aborts a search; exit quietly then.
 try
+if mode == "silent"
+    sleep(60)
+elseif mode in ("truncated", "malformed", "failed", "complete")
+    message = Dict("truncated" => "{\"params\":[", "malformed" => "{\"params\":]}",
+                   "failed" => "{\"complete\":0}", "complete" => "{\"complete\":1}")[mode]
+    write(sock, message)
+    close(sock)
+    exit(0)
+end
 for gen in 0:config.generations-1
     params = map(0:pool-1) do i
         knobs = length(dna) == 1 ? payload(dna[1], i) :
                 JSON.json([base64encode(payload(p, i)) for p in dna])
-        (; id=i, knobs)
+        id = mode == "repeated_generation" ? 100 + 7i : mode == "duplicate_ids" ? 0 : i
+        (; id, knobs)
     end
     # Split the message across two writes to exercise the client's reassembly.
-    msg = JSON.json((; params, invocation_id=gen, generation_num=gen))
+    msg = JSON.json((; params, invocation_id=42, generation_num=mode == "repeated_generation" ? 0 : gen))
     write(sock, msg[1:end÷2]); flush(sock); sleep(0.01); write(sock, msg[end÷2+1:end]); flush(sock)
 
     reply = JSON.parse(readline(sock))
     haskey(reply, "evaluated_params") || fail(sock, "missing evaluated_params")
     ids = sort(Int[e.id for e in reply.evaluated_params])
-    ids == collect(0:pool-1) || fail(sock, "ids $ids != 0:$(pool-1)")
+    ids == sort(Int[p.id for p in params]) || fail(sock, "wrong candidate IDs: $ids")
     for e in reply.evaluated_params
         length(e.scores) == num_objectives || fail(sock, "candidate $(e.id) returned $(length(e.scores)) scores")
         all(s -> s isa Number || s == "*", e.scores) || fail(sock, "candidate $(e.id) has a non-numeric score $(e.scores)")
+        mode == "repeated_generation" && e.scores[1] != e.id && fail(sock, "score assigned to wrong candidate")
     end
 end
 write(sock, JSON.json((; complete=1)))

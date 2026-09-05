@@ -1,7 +1,7 @@
 # The client side of the core protocol.
 #
 # The client listens on a localhost TCP port and starts the core with that
-# address in CIQ_HOST/CIQ_PORT; the core connects back. Then, per generation:
+# address in CIQ_HOST/CIQ_PORT; the core connects back. Then, per batch:
 #
 #   core → client   {"params":[{"id":0,"knobs":"…"},…],"invocation_id":i,"generation_num":g}
 #   client → core   {"evaluated_params":[{"id":0,"scores":[12.5]},…]}\n
@@ -15,8 +15,8 @@ const INVALID_SCORE = "*"
 """
     Candidate
 
-One evaluated point of a search: `generation`, the core's `id` within that
-generation, the decoded `params` (an [`ACF`](@ref), a `Dict`, or a `Vector`
+One evaluated point of a search: `generation`, the core's `id` in its evaluation
+batch, the decoded `params` (an [`ACF`](@ref), a `Dict`, or a `Vector`
 for mixed spaces) and `scores` — one `Float64` per objective, `missing` where
 the candidate was invalid.
 """
@@ -79,78 +79,21 @@ function best(result::SearchResult; objective::Int=1)
 end
 
 # ---------------------------------------------------------------------------
-# Core session
-
-function _receive(sock::TCPSocket, proc::Base.Process)
-    buf = UInt8[]
-    while true
-        if eof(sock)
-            exited = process_exited(proc) ? " (core exit code $(proc.exitcode))" : ""
-            error("CompileIQ core closed the connection" * (isempty(buf) ? "" : " mid-message") * exited)
-        end
-        append!(buf, readavailable(sock))
-        msg = try
-            JSON.parse(buf)
-        catch
-            nothing   # incomplete; keep reading
-        end
-        msg === nothing || return msg
-    end
-end
-
-function _send(sock::TCPSocket, response)
-    write(sock, JSON.json(response), "\n")
-    flush(sock)
-end
-
-# Run `body(sock, proc)` against a freshly started core configured with `space`
-# and `config`. Temporary files and the process are cleaned up afterwards.
-function withcore(body, space, config::SearchConfig)
-    dir = mktempdir()
-    try
-        dna = materialize(space, dir)
-        config_path = joinpath(dir, "main_config.json")
-        write(config_path, JSON.json(core_config(config, dna)))
-
-        server = listen(ip"127.0.0.1", 0)
-        port = getsockname(server)[2]
-        proc = run(pipeline(core_cmd(config_path; host="127.0.0.1", port); stdout=devnull, stderr=stderr); wait=false)
-        sock = nothing
-        try
-            accepting = @async accept(server)
-            while !istaskdone(accepting)
-                process_exited(proc) && error("CompileIQ core exited with code $(proc.exitcode) before connecting")
-                sleep(0.02)
-            end
-            sock = fetch(accepting)
-            return body(sock, proc)
-        finally
-            sock === nothing || close(sock)
-            close(server)
-            # Give the core a moment to exit on its own, then SIGKILL like the
-            # Python client does: SIGTERM makes the Racket runtime dump a
-            # "user break" trace to stderr.
-            for _ in 1:50
-                process_running(proc) || break
-                sleep(0.01)
-            end
-            process_running(proc) && kill(proc, Base.SIGKILL)
-        end
-    finally
-        rm(dir; recursive=true, force=true)
-    end
-end
-
-# ---------------------------------------------------------------------------
 # Scores
 
-_wire_score(x::Real) = isfinite(x) ? Float64(x) : INVALID_SCORE
+function _wire_score(x::Real)
+    value = Float64(x)
+    return isfinite(value) ? value : INVALID_SCORE
+end
 _wire_score(::Missing) = INVALID_SCORE
 _wire_score(::Nothing) = INVALID_SCORE
 _wire_score(x) = throw(ArgumentError("objective must return a Real, missing, or a tuple/vector of those; got $(typeof(x))"))
 
 # Objective return value → the per-objective list sent to the core.
 function _wire_scores(value, num_objectives::Int)
+    if value === missing || value === nothing
+        return fill(INVALID_SCORE, num_objectives)
+    end
     if value isa Union{Tuple,AbstractVector}
         length(value) == num_objectives ||
             throw(ArgumentError("objective returned $(length(value)) values for $num_objectives objectives"))
@@ -166,11 +109,12 @@ function _evaluate(objective, params, config::SearchConfig, catch_errors::Bool)
     value = try
         objective(params)
     catch err
-        catch_errors || rethrow()
+        (err isa InterruptException || !catch_errors) && rethrow()
         @warn "objective threw; treating candidate as invalid" exception = (err, catch_backtrace()) maxlog = 5
         missing
     end
-    _wire_scores(value, config.num_objectives)
+    # Snapshot scores immediately: objectives may reuse a mutable output buffer.
+    return Union{Missing,Float64}[_recorded.(_wire_scores(value, config.num_objectives))...]
 end
 
 # ---------------------------------------------------------------------------
@@ -185,16 +129,21 @@ vector of them for a mixed space), calling `objective(params)` on each
 candidate. Keyword arguments other than the ones listed are passed to
 [`SearchConfig`](@ref).
 
-`objective` receives an [`ACF`](@ref) for compiler spaces, a `Dict{String,Any}`
+`objective` receives an [`ACF`](@ref) for compiler spaces, a nested `NamedTuple`
 for a [`ParamSpace`](@ref), or a `Vector` of those for a mixed space. It
 returns a `Real` — or a tuple with one entry per objective — and `missing` for
 an invalid candidate (failed compile, wrong answer, timeout). Non-finite values
 count as invalid. With `catch_errors=true` an exception from the objective also
-marks the candidate invalid instead of aborting the search.
+marks the candidate invalid instead of aborting the search. Interrupts always
+propagate. A scalar `missing` invalidates every objective.
 
-Candidates of a generation are evaluated with `map(f, candidates)`; pass a
+Candidates of a batch are evaluated with `map(f, candidates)`; pass a
 concurrent `map` (e.g. `asyncmap`, or one that dispatches to several GPUs) to
 evaluate in parallel. The core is always driven sequentially.
+
+`connect_timeout=30` and `io_timeout=60` bound core startup and socket I/O
+in seconds; `nothing` disables either limit. Objective evaluation has no imposed
+timeout. See [`Session`](@ref).
 
 Returns a [`SearchResult`](@ref).
 
@@ -205,41 +154,29 @@ Returns a [`SearchResult`](@ref).
     write("best.acf", best(result).params)
 """
 function search(objective, space; config::Union{Nothing,SearchConfig}=nothing, map=Base.map,
-                catch_errors::Bool=true, progress::Bool=true, kwargs...)
-    if config === nothing
-        config = SearchConfig(; kwargs...)
-    elseif !isempty(kwargs)
-        throw(ArgumentError("pass either config=SearchConfig(...) or SearchConfig keywords, not both"))
-    end
-    search(objective, space, config; map, catch_errors, progress)
+                catch_errors::Bool=true, progress::Bool=true, connect_timeout=30, io_timeout=60, kwargs...)
+    config = _resolve_search_config(config, kwargs)
+    search(objective, space, config; map, catch_errors, progress, connect_timeout, io_timeout)
 end
 
-function search(objective, space, config::SearchConfig; map=Base.map, catch_errors::Bool=true, progress::Bool=true)
+function search(objective, space, config::SearchConfig; map=Base.map, catch_errors::Bool=true,
+                progress::Bool=true, connect_timeout=30, io_timeout=60)
     candidates = Candidate[]
-    withcore(space, config) do sock, proc
-        while true
-            msg = _receive(sock, proc)
-            if haskey(msg, :complete)
-                Bool(msg.complete) || error("CompileIQ core reported a failed search")
-                break
-            end
-            generation = Int(msg.generation_num)
-            params = [decode(space, String(c.knobs)) for c in msg.params]
-            scores = map(p -> _evaluate(objective, p, config, catch_errors), params)
-            evaluated = Any[]
-            for (c, p, s) in zip(msg.params, params, scores)
-                push!(candidates, Candidate(generation, Int(c.id), p, Union{Missing,Float64}[_recorded.(s)...]))
-                push!(evaluated, (; id=Int(c.id), scores=s))
+    Session(space, config; connect_timeout, io_timeout) do session
+        while (batch = receive(session)) !== nothing
+            params = [p.params for p in batch]
+            values = collect(map(p -> _evaluate(objective, p, config, catch_errors), params))
+            submit!(session, batch, values)
+            for (proposal, scores) in zip(batch, values)
+                push!(candidates, Candidate(batch.generation, proposal.id, proposal.params, scores))
             end
             if progress
-                result = SearchResult(config, space, candidates)
-                b = best(result)
-                @info "CompileIQ generation $generation" candidates = length(params) valid = count(isvalid, candidates[end-length(params)+1:end]) best = (b === nothing ? missing : b.scores[1])
+                b = best(SearchResult(config, space, candidates))
+                @info "CompileIQ generation $(batch.generation)" batch = batch.sequence candidates = length(batch) valid = count(isvalid, candidates[end-length(batch)+1:end]) best = (b === nothing ? missing : b.scores[1])
             end
-            _send(sock, (; evaluated_params=evaluated))
         end
     end
-    SearchResult(config, space, candidates)
+    return SearchResult(config, space, candidates)
 end
 
 """
@@ -247,8 +184,9 @@ end
 
 Draw `n` candidates from `space` without searching — what the objective would
 receive. Useful for a shape check of the objective before starting a search.
+Accepts the same `connect_timeout` and `io_timeout` keywords as [`Session`](@ref).
 """
-function sample(space, n::Integer=1; config::SearchConfig=SearchConfig())
+function sample(space, n::Integer=1; config::SearchConfig=SearchConfig(), connect_timeout=30, io_timeout=60)
     n > 0 || throw(ArgumentError("n must be positive"))
     # Same trick as the Python client: ask for one generation with a pool of at
     # least n and stop after the first message.
@@ -256,9 +194,9 @@ function sample(space, n::Integer=1; config::SearchConfig=SearchConfig())
                          pool_size=max(Int(n), 6), cull_size=2, mutate_rate=config.mutate_rate,
                          init_with_true_random_threshold=config.init_with_true_random_threshold,
                          enable_large_fail_pool=config.enable_large_fail_pool)
-    withcore(space, probe) do sock, proc
-        msg = _receive(sock, proc)
-        haskey(msg, :complete) && error("CompileIQ core finished without producing samples")
-        [decode(space, String(c.knobs)) for c in msg.params[1:min(n, end)]]
+    Session(space, probe; connect_timeout, io_timeout) do session
+        batch = receive(session)
+        batch === nothing && error("CompileIQ core finished without producing samples")
+        return [p.params for p in batch.candidates[1:min(n, end)]]
     end
 end
